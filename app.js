@@ -8,9 +8,13 @@ const pdfParse = require('pdf-parse');
 const PDFDocument = require('pdfkit');
 const mongoose = require('mongoose');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
+const cors = require('cors');
 
 const app = express();
-const port = 3000;
+const port = 5000;
+
+// Enable CORS
+app.use(cors());
 
 // Set up multer for file uploads
 const upload = multer({ dest: 'uploads/' });
@@ -85,13 +89,11 @@ app.post('/upload', upload.fields([{ name: 'pdf', maxCount: 1 }, { name: 'enroll
     console.log('PDF text extracted');
     const text = data.text;
 
-    // Check if it's an assignment PDF
     if (!text.toLowerCase().includes('assignment') && !text.toLowerCase().includes('lab')) {
       console.log('Not an assignment PDF');
       return res.status(400).send('This is not an assignment PDF. Please upload a valid assignment or lab document.');
     }
 
-    // Limit check (assuming a rough character limit of 5000 for Gemini)
     if (text.length > 5000) {
       console.log('PDF too large');
       return res.status(400).send('PDF is too large. Please limit the content to a manageable size for processing.');
@@ -149,7 +151,7 @@ app.get('/download/:id', async (req, res) => {
     }
 
     const solutionPdfPath = submission.solutionPdfPath;
-    res.download(solutionPdfPath);
+    res.download(solutionPdfPath, path.basename(solutionPdfPath)); // Ensure filename includes .pdf
   } catch (error) {
     console.error(error);
     res.status(500).send('An error occurred.');
