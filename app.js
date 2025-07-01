@@ -16,17 +16,18 @@ const port = 3000;
 const upload = multer({ dest: 'uploads/' });
 
 // Connect to MongoDB
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://localhost:27017/pdf_solution', { 
-  useNewUrlParser: true, 
-  useUnifiedTopology: true 
-});
+mongoose.connect(process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/pdf_solution')
+  .catch(err => console.error('MongoDB connection error:', err));
 
 // Define Submission model
 const Submission = mongoose.model('Submission', {
   id: String,
   originalPdfPath: String,
   solutionPdfPath: String,
-  createdAt: { type: Date, default: Date.now }
+  createdAt: { type: Date, default: Date.now },
+  enrollment: String,
+  name: String,
+  batch: String
 });
 
 // Set up Gemini API
@@ -36,50 +37,104 @@ const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 // Serve static files
 app.use(express.static('public'));
 
+// Helper function to generate content with retries
+async function generateContentWithRetry(prompt, retries = 3, delay = 1000) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const result = await model.generateContent(prompt);
+      if (!result || !result.response || !result.response.text) {
+        throw new Error('Failed to get a valid response from Gemini API');
+      }
+      return result.response.text();
+    } catch (error) {
+      if (error.status === 503 && attempt < retries) {
+        console.log(`Attempt ${attempt} failed with 503. Retrying in ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        delay *= 2; // Exponential backoff
+      } else {
+        throw error; // Re-throw if not 503 or retries exhausted
+      }
+    }
+  }
+  throw new Error('All retry attempts failed');
+}
+
 // Route for uploading PDF
-app.post('/upload', upload.single('pdf'), async (req, res) => {
+app.post('/upload', upload.fields([{ name: 'pdf', maxCount: 1 }, { name: 'enrollment' }, { name: 'name' }, { name: 'batch' }]), async (req, res) => {
+  console.log('Received /upload request');
   try {
-    const file = req.file;
+    const file = req.files['pdf'] ? req.files['pdf'][0] : null;
+    const enrollment = req.body.enrollment || 'Unknown';
+    const name = req.body.name || 'Unknown';
+    const batch = req.body.batch || 'Unknown';
+    console.log('File received:', file, 'Enrollment:', enrollment, 'Name:', name, 'Batch:', batch);
+
     if (!file) {
+      console.log('No file uploaded');
       return res.status(400).send('No file uploaded.');
     }
 
-    // Generate unique ID
     const submissionId = uuidv4();
-
-    // Save original PDF path
+    console.log('Generated submission ID:', submissionId);
     const originalPdfPath = file.path;
+    console.log('Original PDF path:', originalPdfPath);
 
-    // Extract text from PDF
     const dataBuffer = fs.readFileSync(originalPdfPath);
+    console.log('PDF buffer read');
     const data = await pdfParse(dataBuffer);
+    console.log('PDF text extracted');
     const text = data.text;
 
-    // Send text to Gemini
-    const prompt = `Generate a coding solution for the following problem:\n\n${text}`;
-    const result = await model.generateContent(prompt);
-    const solution = result.response.text();
+    // Check if it's an assignment PDF
+    if (!text.toLowerCase().includes('assignment') && !text.toLowerCase().includes('lab')) {
+      console.log('Not an assignment PDF');
+      return res.status(400).send('This is not an assignment PDF. Please upload a valid assignment or lab document.');
+    }
 
-    // Generate solution PDF
-    const solutionPdfPath = path.join('solutions', `${submissionId}.pdf`);
+    // Limit check (assuming a rough character limit of 5000 for Gemini)
+    if (text.length > 5000) {
+      console.log('PDF too large');
+      return res.status(400).send('PDF is too large. Please limit the content to a manageable size for processing.');
+    }
+
+    const prompt = `You are a professional coding assistant. Please provide detailed, well-structured, and optimized solutions for each question listed in the following assignment PDF text. Ensure the code is commented, follows best practices, and addresses all specified requirements. If a question cannot be solved due to incomplete information, note it clearly. Assignment text:\n\n${text}`;
+    console.log('Sending prompt to Gemini:', prompt);
+    const solution = await generateContentWithRetry(prompt);
+    console.log('Gemini response received');
+
+    const outputFilename = `${enrollment}_${name.replace(/ /g, '_')}_${batch}.pdf`.replace(/[^a-zA-Z0-9_]/g, '_');
+    const solutionPdfPath = path.join(__dirname, 'solutions', outputFilename);
+    console.log('Generating solution PDF at:', solutionPdfPath);
+    const solutionsDir = path.join(__dirname, 'solutions');
+    if (!fs.existsSync(solutionsDir)) {
+      fs.mkdirSync(solutionsDir, { recursive: true });
+      console.log('Created solutions directory:', solutionsDir);
+    }
+
     const doc = new PDFDocument();
     doc.pipe(fs.createWriteStream(solutionPdfPath));
     doc.fontSize(12).text('Coding Solution', { align: 'center' });
     doc.moveDown();
+    doc.text(`Enrollment: ${enrollment}, Name: ${name}, Batch: ${batch}`);
+    doc.moveDown();
     doc.text(solution);
     doc.end();
 
-    // Save submission to database
     const submission = new Submission({
       id: submissionId,
       originalPdfPath,
       solutionPdfPath,
+      enrollment,
+      name,
+      batch
     });
+    console.log('Saving submission to MongoDB');
     await submission.save();
 
+    console.log('Sending response with submission ID:', submissionId);
     res.json({ submissionId });
   } catch (error) {
-    console.error(error);
+    console.error('Error in /upload:', error.message, error.stack);
     res.status(500).send('An error occurred.');
   }
 });
