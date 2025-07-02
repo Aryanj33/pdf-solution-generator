@@ -112,7 +112,7 @@ const App = () => {
 
     try {
       // Send the form data to the backend server
-      const response = await fetch('http://localhost:5000/upload', {
+      const response = await fetch('https://solveit-zd9z.onrender.com', {
         method: 'POST',
         body: formData,
       });
