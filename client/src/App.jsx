@@ -119,8 +119,7 @@ const App = () => {
       
       if (!response.ok) {
         throw new Error(`CONNECTION_ERROR: ${response.status}`);
-      }
-      
+      } 
       const data = await response.json();
       setSubmissionId(data.submissionId); // Save submission ID for download
       
